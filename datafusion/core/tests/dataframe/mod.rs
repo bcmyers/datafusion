@@ -20,15 +20,11 @@ mod dataframe_functions;
 mod describe;
 
 use arrow::array::{
-    record_batch, Array, ArrayRef, BooleanArray, DictionaryArray, FixedSizeListArray,
-    FixedSizeListBuilder, Float32Array, Float64Array, Int32Array, Int32Builder,
-    Int8Array, LargeListArray, ListArray, ListBuilder, RecordBatch, StringArray,
-    StringBuilder, StructBuilder, UInt32Array, UInt32Builder, UnionArray,
+    record_batch, Array, ArrayRef, BooleanArray, DictionaryArray, FixedSizeListArray, FixedSizeListBuilder, Float32Array, Float64Array, Int32Array, Int32Builder, Int8Array, LargeListArray, ListArray, ListBuilder, RecordBatch, StringArray, StringBuilder, StringDictionaryBuilder, StructBuilder, UInt32Array, UInt32Builder, UnionArray
 };
 use arrow::buffer::ScalarBuffer;
 use arrow::datatypes::{
-    DataType, Field, Float32Type, Int32Type, Schema, SchemaRef, UInt64Type, UnionFields,
-    UnionMode,
+    DataType, Field, Float32Type, Int32Type, Int8Type, Schema, SchemaRef, UInt64Type, UnionFields, UnionMode
 };
 use arrow::error::ArrowError;
 use arrow::util::pretty::pretty_format_batches;
@@ -3499,6 +3495,48 @@ async fn test_grouping_set_array_agg_with_overflow() -> Result<()> {
     +----+----+--------+---------------------+
     "###
     );
+
+    Ok(())
+}
+
+#[tokio::test]
+async fn df_list_of_dict_should_panic() -> Result<()> {
+    // build List<Dictionary<Int8,Utf8>>
+    let mut dict_builder = StringDictionaryBuilder::<Int8Type>::new();
+    for s in ["foo","bar","baz","foo"] { dict_builder.append(s)?; }
+    let mut list_builder = ListBuilder::new(dict_builder);
+    list_builder.values().append("foo")?; 
+    list_builder.values().append("bar")?;
+    list_builder.append(true);
+    list_builder.values().append("baz")?; 
+    list_builder.append(true);
+    let list_dict = list_builder.finish();
+
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int32, false),
+        Field::new("c", list_dict.data_type().clone(), false),
+    ]));
+    let batch = RecordBatch::try_new(
+        schema.clone(),
+        vec![Arc::new(Int32Array::from(vec![1,2])), Arc::new(list_dict)],
+    )?;
+
+    let ctx = SessionContext::new();
+    ctx.register_batch("x", batch)?;
+
+    // GROUP BY forces Aggregate (first RowConverter pass)
+    // ORDER BY … LIMIT forces TopKExec (second pass)
+    let df = ctx.sql(
+        r#"
+        SELECT c, COUNT(*) AS cnt
+        FROM   x
+        GROUP  BY c
+        ORDER  BY cnt DESC
+        LIMIT  10
+        "#,
+    ).await?;
+
+    df.collect().await?;
 
     Ok(())
 }
